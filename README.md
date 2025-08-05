@@ -31,6 +31,17 @@ cd OmniParser
 conda create -n "omni" python==3.12
 conda activate omni
 pip install -r requirements.txt
+# IMPORTANT: These are the versions that work other versions will throw errors while processing
+
+ apt-get update
+ apt-get install -y libgl1-mesa-glx libglib2.0-0 libsm6 libxext6 libxrender-dev libgomp1
+ pip install "transformers==4.51.3" #fixes problems with florence2 compatibility
+ pip uninstall -y gradio fastapi pydantic starlette  #purge previously installed versions
+ pip install -U \
+  "gradio==4.20.0" \
+  "fastapi==0.110.*" \
+  "pydantic==2.6.*" \
+  "starlette==0.37.*"
 ```
 
 Ensure you have the V2 weights downloaded in weights folder (ensure caption weights folder is called icon_caption_florence). If not download them with:
