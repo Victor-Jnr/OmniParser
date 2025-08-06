@@ -20,4 +20,5 @@ WORKDIR /workspace
 EXPOSE 52000
 
 # To run the container with unlimited memory, port mapping, workspace mount, and a specific name:
-# docker run --gpus all -it --name Omniparser-v2 -v /mnt/c/git/OmniParser:/workspace omniparserv2:latest 
+# docker run --gpus all -it --name Omniparser-v2 -v /mnt/c/git/OmniParser:/workspace omniparserv2:latest
+# docker run --gpus all -it --name Omniparser-v2-with-port -p 52000:52000 -v /mnt/c/git/OmniParser:/workspace omniparserv2:latest 

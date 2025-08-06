@@ -1,6 +1,7 @@
 import os
 import io
 import base64 # Not directly used in the final output for this API, but was in original 'process'
+import json
 import logging
 import tempfile # Using tempfile for more robust temporary file creation
 
@@ -12,7 +13,7 @@ import torch
 # --- Import your utility functions ---
 # Ensure utils.py is in the same directory or accessible via PYTHONPATH
 try:
-    from utils import check_ocr_box, get_yolo_model, get_caption_model_processor, get_som_labeled_img
+    from util.utils import check_ocr_box, get_yolo_model, get_caption_model_processor, get_som_labeled_img
 except ImportError as e:
     print(f"Error importing from utils.py: {e}. Make sure utils.py is accessible.")
     # You might want to exit or handle this more gracefully if utils are critical at module level
@@ -35,22 +36,22 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 
 
 # Model paths (adjust if your directory structure is different)
-yolo_model_path = os.path.join(current_dir, 'weights', 'icon_detect_v1_5', 'model.pt')
-# Fix the syntax error and use BLIP-2 instead of Florence-2
-blip2_model_path = os.path.join(current_dir, "weights", "icon_caption_blip2")
+yolo_model_path = os.path.join(current_dir, 'weights', 'icon_detect', 'model.pt')
+# Use Florence-2 model
+florence_model_path = os.path.join(current_dir, "weights", "icon_caption_florence")
 
 # Load models
 try:
     if not os.path.exists(yolo_model_path):
         logger.error(f"YOLO model file not found at: {yolo_model_path}")
         raise FileNotFoundError(f"YOLO model file not found: {yolo_model_path}")
-    if not os.path.exists(blip2_model_path):
-         logger.error(f"BLIP-2 model path not found at: {blip2_model_path}")
-         raise FileNotFoundError(f"BLIP-2 model path not found: {blip2_model_path}")
+    if not os.path.exists(florence_model_path):
+         logger.error(f"Florence-2 model path not found at: {florence_model_path}")
+         raise FileNotFoundError(f"Florence-2 model path not found: {florence_model_path}")
 
     yolo_model = get_yolo_model(model_path=yolo_model_path)
-    # Use BLIP-2 instead of Florence-2 to avoid compatibility issues
-    caption_model_processor = get_caption_model_processor(model_name="blip2", model_name_or_path=blip2_model_path)
+    # Use Florence-2 model
+    caption_model_processor = get_caption_model_processor(model_name="florence2", model_name_or_path=florence_model_path)
     logger.info("Models loaded successfully.")
 except Exception as e:
     logger.error(f"Fatal error loading models: {e}", exc_info=True)
@@ -136,8 +137,11 @@ def extract_ocr_from_image(
             imgsz=imgsz
         )
         
-        parsed_text_output = '\n'.join(parsed_content_list)
-        logger.info("Content parsing successful.")
+        parsed_text_output = '\n'.join(
+            f"icon {i}: {json.dumps(item, ensure_ascii=False) if isinstance(item, (dict, list)) else str(item)}"
+            for i, item in enumerate(parsed_content_list)
+        )
+        logger.info(f"Content parsing successful. Found {len(parsed_content_list)} items.")
         return parsed_text_output
 
     except Exception as e:
