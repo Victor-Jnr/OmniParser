@@ -30,3 +30,6 @@ screeninfo
 uiautomation
 dashscope
 groq
+psutil
+pynvml
+python-dotenv
