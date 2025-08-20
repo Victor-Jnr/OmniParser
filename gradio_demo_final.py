@@ -3,7 +3,6 @@ import io
 import base64 # Not directly used in the final output for this API, but was in original 'process'
 import json
 import logging
-import time
 import tempfile # Using tempfile for more robust temporary file creation
 
 from flask import Flask, request, jsonify
@@ -23,33 +22,12 @@ except ImportError as e:
 
 # --- Global Variables & Model Loading ---
 
-# Setup logging (console + rotating file)
-from observability.logging_setup import setup_logging
-from observability.resource_monitor import ResourceMonitor
-from observability.memory_guard import cleanup_caches, limit_threads
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except Exception:
-    pass
+# Setup logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 # Determine the directory of this script for relative path construction
 current_dir = os.path.dirname(os.path.abspath(__file__))
-LOG_DIR = os.path.join(current_dir, 'logs')
-
-# Initialize logging and resource monitor before heavy work
-setup_logging(LOG_DIR)
-limit_threads()
-logger = logging.getLogger(__name__)
-
-# Resource monitor silencer via env
-MONITOR_ENABLED = os.getenv('MONITOR_ENABLED', 'true').lower() == 'true'
-_resource_monitor = None
-if MONITOR_ENABLED:
-    _resource_monitor = ResourceMonitor(interval_seconds=2.0, stats_log_path=os.path.join(LOG_DIR, 'container_stats.log'))
-    _resource_monitor.start()
-else:
-    logger.info("Resource monitor disabled via MONITOR_ENABLED=false")
 
 # Create a directory for temporary images if you prefer a dedicated one,
 # otherwise tempfile module handles temporary file creation securely.
@@ -146,7 +124,6 @@ def extract_ocr_from_image(
         logger.info(f"Raw OCR text extracted (first 50 chars): {text[:50]}")
 
         # Get structured labeled image data (we only need the parsed content list)
-        icon_batch_size = int(os.getenv('ICON_CAPTION_BATCH_SIZE', '16'))
         _, _, parsed_content_list = get_som_labeled_img(
             image_save_path,
             yolo_model,
@@ -157,8 +134,7 @@ def extract_ocr_from_image(
             caption_model_processor=caption_model_processor,
             ocr_text=text,
             iou_threshold=iou_threshold,
-            imgsz=imgsz,
-            batch_size=icon_batch_size
+            imgsz=imgsz
         )
         
         parsed_text_output = '\n'.join(
@@ -222,7 +198,6 @@ def ocr_endpoint():
         logger.error(f"API /ocr: Invalid parameter value. Error: {e}", exc_info=True)
         return jsonify({"error": f"Invalid parameter value: {str(e)}"}), 400
 
-    start_time = time.time()
     try:
         # Process the image to get OCR text
         # The @torch.autocast context manager can be used here if needed for mixed precision
@@ -234,18 +209,6 @@ def ocr_endpoint():
             use_paddleocr,
             imgsz
         )
-        duration = (time.time() - start_time) * 1000.0
-        gpu_mem = None
-        if torch.cuda.is_available():
-            try:
-                torch.cuda.synchronize()
-                gpu_mem = torch.cuda.memory_allocated() / 1e6
-            except Exception:
-                gpu_mem = None
-        logger.info(
-            f"API /ocr: Completed successfully in {duration:.1f} ms"
-            + (f", gpu_mem_used={gpu_mem:.1f}MB" if gpu_mem is not None else "")
-        )
         return jsonify({"ocr_text": ocr_text_result})
     
     except RuntimeError as e: # Catch specific model loading issues from helper
@@ -254,11 +217,6 @@ def ocr_endpoint():
     except Exception as e:
         logger.error(f"API /ocr: Unexpected error processing image: {e}", exc_info=True)
         return jsonify({"error": f"An unexpected error occurred during image processing: {str(e)}"}), 500
-    finally:
-        try:
-            cleanup_caches(note="post_request")
-        except Exception:
-            pass
 
 
 @app.route('/health', methods=['GET'])
@@ -273,11 +231,4 @@ if __name__ == '__main__':
     # For production, use a WSGI server like Gunicorn or uWSGI
     # Example: gunicorn --workers 4 --bind 0.0.0.0:58081 api_app:app
     # The port 58080 was used by Gradio, using a different one for the API.
-    try:
-        app.run(host='0.0.0.0', port=52000, debug=False, threaded=False) # Set debug=False for production-like behavior
-    finally:
-        try:
-            if _resource_monitor is not None:
-                _resource_monitor.stop()
-        except Exception:
-            pass
+    app.run(host='0.0.0.0', port=52000, debug=False, threaded=False) # Set debug=False for production-like behavior

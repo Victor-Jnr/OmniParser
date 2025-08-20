@@ -4,7 +4,6 @@ import io
 import base64
 import time
 from PIL import Image, ImageDraw, ImageFont
-import logging
 import json
 import requests
 # utility function
@@ -20,34 +19,22 @@ import numpy as np
 from matplotlib import pyplot as plt
 import easyocr
 from paddleocr import PaddleOCR
-try:
-    from dotenv import load_dotenv as _load_dotenv
-    _load_dotenv()
-except Exception:
-    pass
 reader = easyocr.Reader(['en'])
-# Allow environment overrides for PaddleOCR batching
-_PADDLE_MAX_BATCH = int(os.getenv('PADDLE_MAX_BATCH_SIZE', '1024'))
-_PADDLE_REC_BATCH = int(os.getenv('PADDLE_REC_BATCH_NUM', '1024'))
 paddle_ocr = PaddleOCR(
     lang='en',  # other lang also available
     use_angle_cls=False,
     use_gpu=False,  # using cuda will conflict with pytorch in the same process
     show_log=False,
-    max_batch_size=_PADDLE_MAX_BATCH,
+    max_batch_size=1024,
     use_dilation=True,  # improves accuracy
     det_db_score_mode='slow',  # improves accuracy
-    rec_batch_num=_PADDLE_REC_BATCH)
+    rec_batch_num=1024)
 import time
 import base64
 
 import os
 import ast
 import torch
-try:
-    import psutil  # for memory snapshots
-except Exception:
-    psutil = None
 from typing import Tuple, List, Union
 from torchvision.ops import box_convert
 import re
@@ -55,51 +42,6 @@ from torchvision.transforms import ToPILImage
 import supervision as sv
 import torchvision.transforms as T
 from util.box_annotator import BoxAnnotator 
-from observability.memory_guard import cleanup_caches
-
-_logger = logging.getLogger(__name__)
-
-def _snapshot_memory(note: str = "") -> None:
-    try:
-        if psutil is None:
-            return
-        proc = psutil.Process(os.getpid())
-        rss_mb = proc.memory_info().rss / 1e6
-        gpu_mb = None
-        if torch.cuda.is_available():
-            try:
-                torch.cuda.synchronize()
-            except Exception:
-                pass
-            try:
-                gpu_mb = torch.cuda.memory_allocated() / 1e6
-            except Exception:
-                gpu_mb = None
-        _logger.info(
-            f"mem_snapshot{(' ' + note) if note else ''}: rss={rss_mb:.1f}MB" + (f", gpu={gpu_mb:.1f}MB" if gpu_mb is not None else "")
-        )
-    except Exception:
-        pass
-
-# Memory guard configuration (env-configurable)
-_MEM_GUARD_ENABLED = os.getenv('MEM_GUARD_ENABLED', 'true').lower() == 'true'
-try:
-    _MEM_GUARD_SYS_AVAIL_MIN_MB = int(os.getenv('MEM_GUARD_SYS_AVAIL_MIN_MB', '800'))
-    _MEM_GUARD_PROC_RSS_MAX_MB = int(os.getenv('MEM_GUARD_PROC_RSS_MAX_MB', '30000'))
-except Exception:
-    _MEM_GUARD_SYS_AVAIL_MIN_MB = 800
-    _MEM_GUARD_PROC_RSS_MAX_MB = 30000
-
-def _is_memory_low() -> bool:
-    if not _MEM_GUARD_ENABLED or psutil is None:
-        return False
-    try:
-        vm = psutil.virtual_memory()
-        avail_mb = vm.available / 1e6
-        rss_mb = psutil.Process(os.getpid()).memory_info().rss / 1e6
-        return avail_mb < _MEM_GUARD_SYS_AVAIL_MIN_MB or rss_mb > _MEM_GUARD_PROC_RSS_MAX_MB
-    except Exception:
-        return False
 
 
 def get_caption_model_processor(model_name, model_name_or_path="Salesforce/blip2-opt-2.7b", device=None):
@@ -137,12 +79,20 @@ def get_yolo_model(model_path):
 def get_parsed_content_icon(filtered_boxes, starting_idx, image_source, caption_model_processor, prompt=None, batch_size=128):
     # Number of samples per batch, --> 128 roughly takes 4 GB of GPU memory for florence v2 model
     to_pil = ToPILImage()
-    _snapshot_memory("before_select_boxes")
     if starting_idx:
         non_ocr_boxes = filtered_boxes[starting_idx:]
     else:
         non_ocr_boxes = filtered_boxes
-    _logger.info(f"num_non_ocr_boxes={len(non_ocr_boxes)} starting_idx={starting_idx} batch_size={batch_size}")
+    croped_pil_image = []
+    for i, coord in enumerate(non_ocr_boxes):
+        try:
+            xmin, xmax = int(coord[0]*image_source.shape[1]), int(coord[2]*image_source.shape[1])
+            ymin, ymax = int(coord[1]*image_source.shape[0]), int(coord[3]*image_source.shape[0])
+            cropped_image = image_source[ymin:ymax, xmin:xmax, :]
+            cropped_image = cv2.resize(cropped_image, (64, 64))
+            croped_pil_image.append(to_pil(cropped_image))
+        except:
+            continue
 
     model, processor = caption_model_processor['model'], caption_model_processor['processor']
     if not prompt:
@@ -153,50 +103,21 @@ def get_parsed_content_icon(filtered_boxes, starting_idx, image_source, caption_
     
     generated_texts = []
     device = model.device
-    total = len(non_ocr_boxes)
-    # Memory guard: shrink batch size dynamically if memory is low
-    dynamic_batch = max(1, min(batch_size, 128))
-    if _is_memory_low():
-        dynamic_batch = max(1, min(dynamic_batch, 8))
-        _logger.warning(f"Memory low: reducing caption batch size to {dynamic_batch}")
-
-    for i in range(0, total, dynamic_batch):
+    for i in range(0, len(croped_pil_image), batch_size):
         start = time.time()
-        # Build crops for this batch only to reduce peak memory
-        batch_coords = non_ocr_boxes[i:i+dynamic_batch]
-        batch = []
-        for coord in batch_coords:
-            try:
-                xmin, xmax = int(coord[0]*image_source.shape[1]), int(coord[2]*image_source.shape[1])
-                ymin, ymax = int(coord[1]*image_source.shape[0]), int(coord[3]*image_source.shape[0])
-                cropped_image = image_source[ymin:ymax, xmin:xmax, :]
-                cropped_image = cv2.resize(cropped_image, (64, 64))
-                batch.append(to_pil(cropped_image))
-            except Exception:
-                continue
-        _logger.info(f"caption_batch idx={i} size={len(batch)}")
-        _snapshot_memory("before_processor")
+        batch = croped_pil_image[i:i+batch_size]
         t1 = time.time()
         if model.device.type == 'cuda':
             inputs = processor(images=batch, text=[prompt]*len(batch), return_tensors="pt", do_resize=False).to(device=device, dtype=torch.float16)
         else:
             inputs = processor(images=batch, text=[prompt]*len(batch), return_tensors="pt").to(device=device)
-        _snapshot_memory("after_processor")
         if 'florence' in model.config.name_or_path:
             generated_ids = model.generate(input_ids=inputs["input_ids"],pixel_values=inputs["pixel_values"],max_new_tokens=20,num_beams=1, do_sample=False)
         else:
             generated_ids = model.generate(**inputs, max_length=100, num_beams=5, no_repeat_ngram_size=2, early_stopping=True, num_return_sequences=1) # temperature=0.01, do_sample=True,
-        _snapshot_memory("after_generate")
         generated_text = processor.batch_decode(generated_ids, skip_special_tokens=True)
         generated_text = [gen.strip() for gen in generated_text]
         generated_texts.extend(generated_text)
-        try:
-            del inputs
-            del batch
-            torch.cuda.empty_cache() if torch.cuda.is_available() else None
-        except Exception:
-            pass
-        cleanup_caches(note="after_caption_batch")
     
     return generated_texts
 
@@ -497,9 +418,7 @@ def get_som_labeled_img(image_source: Union[str, Image.Image], model=None, BOX_T
     if not imgsz:
         imgsz = (h, w)
     # print('image size:', w, h)
-    _snapshot_memory("before_yolo")
     xyxy, logits, phrases = predict_yolo(model=model, image=image_source, box_threshold=BOX_TRESHOLD, imgsz=imgsz, scale_img=scale_img, iou_threshold=0.1)
-    _snapshot_memory("after_yolo")
     xyxy = xyxy / torch.Tensor([w, h, w, h]).to(xyxy.device)
     image_source = np.asarray(image_source)
     phrases = [str(i) for i in range(len(phrases))]
@@ -515,7 +434,6 @@ def get_som_labeled_img(image_source: Union[str, Image.Image], model=None, BOX_T
     ocr_bbox_elem = [{'type': 'text', 'bbox':box, 'interactivity':False, 'content':txt, 'source': 'box_ocr_content_ocr'} for box, txt in zip(ocr_bbox, ocr_text) if int_box_area(box, w, h) > 0] 
     xyxy_elem = [{'type': 'icon', 'bbox':box, 'interactivity':True, 'content':None} for box in xyxy.tolist() if int_box_area(box, w, h) > 0]
     filtered_boxes = remove_overlap_new(boxes=xyxy_elem, iou_threshold=iou_threshold, ocr_bbox=ocr_bbox_elem)
-    _logger.info(f"len(filtered_boxes): {len(filtered_boxes)}")
     
     # sort the filtered_boxes so that the one with 'content': None is at the end, and get the index of the first 'content': None
     filtered_boxes_elem = sorted(filtered_boxes, key=lambda x: x['content'] is None)
@@ -561,7 +479,6 @@ def get_som_labeled_img(image_source: Union[str, Image.Image], model=None, BOX_T
     buffered = io.BytesIO()
     pil_img.save(buffered, format="PNG")
     encoded_image = base64.b64encode(buffered.getvalue()).decode('ascii')
-    _snapshot_memory("after_annotation")
     if output_coord_in_ratio:
         label_coordinates = {k: [v[0]/w, v[1]/h, v[2]/w, v[3]/h] for k, v in label_coordinates.items()}
         assert w == annotated_frame.shape[1] and h == annotated_frame.shape[0]
@@ -592,13 +509,7 @@ def check_ocr_box(image_source: Union[str, Image.Image], display_img = True, out
         image_source = image_source.convert('RGB')
     image_np = np.array(image_source)
     w, h = image_source.size
-    _snapshot_memory("before_ocr")
-    # Memory guard: if memory is low, force EasyOCR regardless of requested engine
-    engine_paddle = use_paddleocr and not _is_memory_low()
-    if use_paddleocr and not engine_paddle:
-        _logger.warning("Memory low: switching OCR engine to EasyOCR for this request")
-
-    if engine_paddle:
+    if use_paddleocr:
         if easyocr_args is None:
             text_threshold = 0.5
         else:
@@ -612,9 +523,6 @@ def check_ocr_box(image_source: Union[str, Image.Image], display_img = True, out
         result = reader.readtext(image_np, **easyocr_args)
         coord = [item[0] for item in result]
         text = [item[1] for item in result]
-    cleanup_caches(note="after_ocr")
-    _logger.info(f"ocr_boxes={len(coord)} use_paddleocr={use_paddleocr}")
-    _snapshot_memory("after_ocr")
     if display_img:
         opencv_img = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
         bb = []
