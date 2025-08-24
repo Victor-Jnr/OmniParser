@@ -26,18 +26,24 @@
 
 ## Install 
 First clone the repo, and then install environment:
-```python
+```bash
 cd OmniParser
-conda create -n "omni" python==3.12
-conda activate omni
-pip install -r requirements.txt
-# IMPORTANT: These are the versions that work other versions will throw errors while processing
 
- apt-get update
- apt-get install -y libgl1-mesa-glx libglib2.0-0 libsm6 libxext6 libxrender-dev libgomp1
- pip install "transformers==4.51.3" #fixes problems with florence2 compatibility
- pip uninstall -y gradio fastapi pydantic starlette  #purge previously installed versions
- pip install -U \
+# Create and activate environment
+conda create -n "omni" python==3.12 -y
+conda activate omni
+
+# Python dependencies
+pip install -r requirements.txt
+
+# System libraries
+apt-get update
+apt-get install -y libgl1-mesa-glx libglib2.0-0 libsm6 libxext6 libxrender-dev libgomp1
+
+# Version pins (Florence2 compatibility and web stack)
+pip install "transformers==4.51.3"
+pip uninstall -y gradio fastapi pydantic starlette
+pip install -U \
   "gradio==4.20.0" \
   "fastapi==0.110.*" \
   "pydantic==2.6.*" \
@@ -45,10 +51,12 @@ pip install -r requirements.txt
 ```
 
 Ensure you have the V2 weights downloaded in weights folder (ensure caption weights folder is called icon_caption_florence). If not download them with:
-```
-   # download the model checkpoints to local directory OmniParser/weights/
-   for f in icon_detect/{train_args.yaml,model.pt,model.yaml} icon_caption/{config.json,generation_config.json,model.safetensors}; do huggingface-cli download microsoft/OmniParser-v2.0 "$f" --local-dir weights; done
-   mv weights/icon_caption weights/icon_caption_florence
+```bash
+# download the model checkpoints to local directory OmniParser/weights/
+for f in icon_detect/{train_args.yaml,model.pt,model.yaml} icon_caption/{config.json,generation_config.json,model.safetensors}; do \
+  huggingface-cli download microsoft/OmniParser-v2.0 "$f" --local-dir weights; \
+done
+mv weights/icon_caption weights/icon_caption_florence
 ```
 
 <!-- ## [deprecated]
@@ -68,8 +76,31 @@ We put together a few simple examples in the demo.ipynb.
 
 ## Gradio Demo
 To run gradio demo, simply run:
-```python
+```bash
 python gradio_demo.py
+```
+
+## Run as API
+
+### Option 1: Python (Flask)
+```bash
+python gradio_demo_final.py
+```
+
+### Option 2: Gunicorn
+```bash
+gunicorn -w 3 --threads 1 --timeout 120 \
+  --bind 0.0.0.0:52000 \
+  --log-level info \
+  --access-logfile - \
+  --error-logfile - \
+  gradio_demo_final:app
+```
+
+## Call the API
+```bash
+curl -X POST http://localhost:52000/ocr -F "image=@/workspace/imgs/temp_image.png"
+curl -I http://host.docker.internal:52000/health
 ```
 
 ## Model Weights License
